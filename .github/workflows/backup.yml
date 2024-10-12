@@ -23,7 +23,7 @@ jobs:
         node-version: 16.x
 
     - name: Install dependencies
-      run: npm install @lighthouse-web3/sdk
+      run: npm install @lighthouse-web3/sdk form-data
 
     - name: Upload to Lighthouse.storage
       env:
