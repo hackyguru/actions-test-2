@@ -10,7 +10,7 @@ async function main() {
   console.log(`Uploading directory: ${sourcePath}`);
 
   try {
-    const response = await lighthouse.uploadDirectory(sourcePath, apiKey);
+    const response = await lighthouse.upload(sourcePath, apiKey);
 
     console.log('Upload response:', response);
 
