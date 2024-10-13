@@ -1,5 +1,9 @@
 const lighthouse = require('@lighthouse-web3/sdk');
 const path = require('path');
+const FormData = require('form-data');
+
+// Polyfill global FormData
+global.FormData = FormData;
 
 async function main() {
   // Get the current working directory (root of the repository)
