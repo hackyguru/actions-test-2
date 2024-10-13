@@ -1,33 +1,19 @@
 const lighthouse = require('@lighthouse-web3/sdk');
-const FormData = require('form-data');
-const fs = require('fs');
 const path = require('path');
 
 async function main() {
-  const apiKey = process.env.LIGHTHOUSE_API_KEY;
+  // Get the current working directory (root of the repository)
+  const repoRoot = process.cwd();
 
-  const formData = new FormData();
+  const uploadResponse = await lighthouse.upload(
+    repoRoot, 
+    '2fc357f7.f952020a20bd4e97afa7aca88221116d'
+  );
 
-  function addFilesToForm(dir) {
-    const files = fs.readdirSync(dir);
-    for (const file of files) {
-      const filePath = path.join(dir, file);
-      const stat = fs.statSync(filePath);
-      if (stat.isDirectory()) {
-        addFilesToForm(filePath);
-      } else {
-        formData.append('file', fs.createReadStream(filePath), { filepath: filePath });
-      }
-    }
-  }
-
-  addFilesToForm('./');
-
-  const uploadResponse = await lighthouse.upload(formData, apiKey);
-
+  console.log(uploadResponse);
   const cid = uploadResponse.data.Hash;
   console.log(`Uploaded to IPFS : ${cid}`);
-  console.log(`::set-output name=cid::${cid}`);
+  process.stdout.write(`::set-output name=cid::${cid}`);
 }
 
 main().catch((error) => {
