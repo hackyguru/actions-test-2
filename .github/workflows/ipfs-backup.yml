@@ -30,12 +30,13 @@ jobs:
         env:
           COMMIT_HASH: ${{ steps.commit.outputs.hash }}
         run: |
-          # Set API URL
-          API_URL="${{ vars.NEXT_PUBLIC_API_URL || 'https://abe1-31-205-111-23.ngrok-free.app' }}"
+          # Set API URL and timeout
+          API_URL="${{ vars.NEXT_PUBLIC_API_URL || 'https://gitvault.xyz' }}"
+          CURL_TIMEOUT=300  # 5 minutes timeout
           echo "API URL: $API_URL"
           
-          # Calculate total chunks
-          CHUNK_SIZE=50000000 # 50MB chunks
+          # Calculate total chunks with smaller chunk size
+          CHUNK_SIZE=25000000 # 25MB chunks (reduced from 50MB)
           TOTAL_CHUNKS=$(tar -czf - --exclude='.git' . | wc -c | awk -v size=$CHUNK_SIZE '{print int(($1+size-1)/size)}')
           echo "Total chunks: $TOTAL_CHUNKS"
           
@@ -47,41 +48,109 @@ jobs:
           cd $TEMP_DIR
           tar -C $GITHUB_WORKSPACE -czf - --exclude='.git' . | split -b $CHUNK_SIZE - chunk-
           
-          # Upload each chunk
+          # Upload each chunk with retries
           CHUNK_NUM=1
+          MAX_RETRIES=3
+          
           for chunk in chunk-*; do
-            echo "Uploading chunk $CHUNK_NUM of $TOTAL_CHUNKS"
-            RESPONSE=$(curl -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "X-GitHub-Repository: ${{ github.repository }}" \
-              -H "X-Upload-Id: ${{ env.UPLOAD_ID }}" \
-              -H "X-Chunk-Number: $CHUNK_NUM" \
-              -H "X-Total-Chunks: $TOTAL_CHUNKS" \
-              -H "X-GitHub-Commit-Hash: $COMMIT_HASH" \
-              -H "X-GitHub-Username: ${{ github.actor }}" \
-              -F "chunk=@$chunk" \
-              "$API_URL/api/storage/upload/chunk")
-            echo "Response: $RESPONSE"
+            success=false
+            retry_count=0
+            
+            while [ $success = false ] && [ $retry_count -lt $MAX_RETRIES ]; do
+              echo "Uploading chunk $CHUNK_NUM of $TOTAL_CHUNKS (Attempt $((retry_count + 1)))"
+              
+              RESPONSE=$(curl --max-time $CURL_TIMEOUT -X POST \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "X-GitHub-Repository: ${{ github.repository }}" \
+                -H "X-Upload-Id: ${{ env.UPLOAD_ID }}" \
+                -H "X-Chunk-Number: $CHUNK_NUM" \
+                -H "X-Total-Chunks: $TOTAL_CHUNKS" \
+                -H "X-GitHub-Commit-Hash: $COMMIT_HASH" \
+                -H "X-GitHub-Username: ${{ github.actor }}" \
+                -H "X-Backup-Owner: ${{ github.actor }}" \
+                -F "chunk=@$chunk" \
+                "$API_URL/api/storage/upload/chunk" || echo "CURL_ERROR")
+              
+              if [ "$RESPONSE" = "CURL_ERROR" ]; then
+                echo "Curl failed for chunk $CHUNK_NUM"
+                retry_count=$((retry_count + 1))
+                [ $retry_count -lt $MAX_RETRIES ] && sleep 5
+                continue
+              fi
+              
+              # Validate JSON response
+              if echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+                success=true
+                echo "Chunk $CHUNK_NUM uploaded successfully"
+              else
+                echo "Invalid JSON response for chunk $CHUNK_NUM: $RESPONSE"
+                retry_count=$((retry_count + 1))
+                [ $retry_count -lt $MAX_RETRIES ] && sleep 5
+              fi
+            done
+            
+            if [ $success = false ]; then
+              echo "Failed to upload chunk $CHUNK_NUM after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
             CHUNK_NUM=$((CHUNK_NUM+1))
           done
           
           # Cleanup temporary directory
           rm -rf $TEMP_DIR
           
-          # Complete upload and get CID
-          RESULT=$(curl -X POST             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"             -H "Content-Type: application/json"             -H "X-GitHub-Repository: ${{ github.repository }}"             -H "X-GitHub-Commit-Hash: $COMMIT_HASH"             -H "X-GitHub-Username: ${{ github.actor }}"             -d "{\"uploadId\":\"${{ env.UPLOAD_ID }}\"}"             "$API_URL/api/storage/upload/complete")
+          # Complete upload with retries
+          success=false
+          retry_count=0
           
-          echo "Result: $RESULT"
-          CID=$(echo "$RESULT" | jq -r '.cid // empty')
+          while [ $success = false ] && [ $retry_count -lt $MAX_RETRIES ]; do
+            echo "Completing upload (Attempt $((retry_count + 1)))"
+            
+            COMPLETE_RESPONSE=$(curl --max-time $CURL_TIMEOUT -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -H "X-GitHub-Repository: ${{ github.repository }}" \
+              -H "X-GitHub-Commit-Hash: $COMMIT_HASH" \
+              -H "X-GitHub-Username: ${{ github.actor }}" \
+              -H "X-Backup-Owner: ${{ github.actor }}" \
+              -d "{\"uploadId\":\"${{ env.UPLOAD_ID }}\"}" \
+              "$API_URL/api/storage/upload/complete" || echo "CURL_ERROR")
+            
+            if [ "$COMPLETE_RESPONSE" = "CURL_ERROR" ]; then
+              echo "Curl failed for completion request"
+              retry_count=$((retry_count + 1))
+              [ $retry_count -lt $MAX_RETRIES ] && sleep 5
+              continue
+            fi
+            
+            # Validate JSON response
+            if echo "$COMPLETE_RESPONSE" | jq -e . >/dev/null 2>&1; then
+              success=true
+              echo "Upload completed successfully"
+              
+              # Extract CID
+              CID=$(echo "$COMPLETE_RESPONSE" | jq -r '.cid // empty')
+              if [ -n "$CID" ]; then
+                echo "CID: $CID"
+                echo "cid=$CID" >> $GITHUB_OUTPUT
+              else
+                echo "Error: CID not found in response"
+                echo "Full response: $COMPLETE_RESPONSE"
+                exit 1
+              fi
+            else
+              echo "Invalid JSON response from complete endpoint"
+              echo "Raw response: $COMPLETE_RESPONSE"
+              retry_count=$((retry_count + 1))
+              [ $retry_count -lt $MAX_RETRIES ] && sleep 5
+            fi
+          done
           
-          if [ -z "$CID" ]; then
-            echo "Error: Failed to get CID from response"
-            echo "Response was: $RESULT"
+          if [ $success = false ]; then
+            echo "Failed to complete upload after $MAX_RETRIES attempts"
             exit 1
           fi
-          
-          echo "CID: $CID"
-          echo "cid=$CID" >> $GITHUB_OUTPUT
 
       - name: Update .gitvault and README
         if: steps.upload.outputs.cid != ''
